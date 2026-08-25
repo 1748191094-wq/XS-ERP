@@ -1,0 +1,1 @@
+import{d as s,c as t,n as a,t as n,A as o,o as c}from"./index-CnEUwwTe.js";const l=s({__name:"InlineNotice",props:{message:{},type:{}},setup(e){return(i,m)=>e.message?(c(),t("p",{key:0,class:a(["inline-notice",e.type||"info"]),role:"status"},n(e.message),3)):o("",!0)}});export{l as _};

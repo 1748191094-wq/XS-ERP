@@ -1,0 +1,53 @@
+.searchable-select {
+  display: grid;
+  gap: 7px;
+}
+
+.searchable-select__search {
+  min-height: 42px !important;
+  background: linear-gradient(0deg, rgba(0, 113, 227, .035), rgba(0, 113, 227, .035)), #fff !important;
+}
+
+.searchable-select select {
+  width: 100%;
+}
+
+.recycle-price-card {
+  padding: 18px;
+  border: 1px solid rgba(0, 113, 227, .2);
+  border-radius: 18px;
+  background: var(--blue-soft);
+}
+
+.recycle-price-card p,
+.recycle-price-card h2 {
+  margin: 0;
+}
+
+.recycle-price-card h2 {
+  margin-top: 5px;
+  font-size: clamp(30px, 8vw, 42px);
+}
+
+html.client-navigating::before {
+  content: "";
+  position: fixed;
+  z-index: 1000;
+  top: 0;
+  left: 0;
+  width: 42%;
+  height: 3px;
+  pointer-events: none;
+  background: var(--blue);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--blue) 55%, transparent);
+  animation: client-route-progress .9s ease-in-out infinite;
+}
+
+@keyframes client-route-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(340%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.client-navigating::before { width: 100%; animation: none; }
+}

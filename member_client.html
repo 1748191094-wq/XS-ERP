@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">
+  <title>维修管理成员端连接</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:#1d1d1f;background:#f2f2f7;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}.card{width:min(520px,100%);padding:30px;border:1px solid rgba(60,60,67,.16);border-radius:22px;background:#fff;box-shadow:0 18px 60px rgba(15,23,42,.1)}.logo{width:48px;height:48px;display:grid;place-items:center;border-radius:14px;color:#fff;background:#0a84ff;font-weight:800}h1{margin:18px 0 6px;font-size:26px}p{color:#6e6e73}label{display:block;margin-top:22px;font-weight:650}input{width:100%;margin-top:7px;padding:13px 14px;border:1px solid rgba(60,60,67,.24);border-radius:11px;font:inherit}button{width:100%;margin-top:14px;padding:13px;border:0;border-radius:11px;color:#fff;background:#0a84ff;font:inherit;font-weight:700;cursor:pointer}.hint{font-size:12px}.error{min-height:22px;color:#d70015}.recent{margin-top:18px;padding-top:14px;border-top:1px solid rgba(60,60,67,.12)}a{color:#0071e3}
+  </style>
+</head>
+<body><main class="card"><div class="logo">服</div><h1>连接管理员主机</h1><p>输入管理员页面显示的局域网访问地址。成员端只通过 HTTPS/HTTP API 工作，不会读取或复制 SQLite 文件。</p><label for="address">主机 IP 或访问地址</label><input id="address" inputmode="url" placeholder="例如 192.168.1.20:8000" autocomplete="url"><button id="connect">连接并登录</button><div id="error" class="error" role="alert"></div><p class="hint">首次连接由浏览器打开登录页；断线后页面会自动检测主机恢复。请勿把主机端口映射到公网。</p><div id="recent" class="recent" hidden><strong>上次连接</strong><p><a id="recent-link"></a></p></div></main>
+<script>
+const input=document.getElementById('address'),error=document.getElementById('error'),recent=localStorage.getItem('serviceHostUrl');
+function normalize(value){let url=value.trim();if(!url)return '';if(!/^https?:\/\//i.test(url))url='http://'+url;const parsed=new URL(url);if(!parsed.port)parsed.port='8000';parsed.pathname='/';parsed.search='';parsed.hash='';return parsed.toString()}
+if(recent){const box=document.getElementById('recent'),link=document.getElementById('recent-link');box.hidden=false;link.href=recent;link.textContent=recent;input.value=recent}
+document.getElementById('connect').onclick=()=>{try{const url=normalize(input.value);if(!url)throw new Error('请填写管理员主机地址');localStorage.setItem('serviceHostUrl',url);location.assign(url)}catch(e){error.textContent=e.message||'地址格式不正确'}};
+input.addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('connect').click()});
+</script></body></html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#18181b">
+  <meta name="color-scheme" content="light">
+  <title>服务管理系统</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260824-p0-security">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到主要内容</a>
+  <aside class="sidebar">
+    <div class="brand"><span id="app-brand-mark" class="brand-mark">服</span><div><strong id="app-brand-name">服务品牌</strong><small>DIGITAL SERVICE OS</small></div></div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot"><span id="service-dot" class="status-dot"></span> <span id="service-state">主机服务运行中</span><br><small>数据只由主机服务访问</small></div>
+  </aside>
+  <main id="main-content">
+    <header>
+      <div class="page-heading">
+        <p id="page-context" class="eyebrow">业务中心</p>
+        <h1 id="page-title">仪表盘</h1>
+      </div>
+      <div class="header-actions">
+        <button class="global-search-trigger" type="button" onclick="openGlobalSearch()"><span>⌕</span> 全局检索 <kbd>Ctrl F</kbd></button>
+        <button class="ghost header-quick-entry" type="button" onclick="openQuickEntry()">＋ 快捷录入</button>
+        <button class="primary header-email-compose" type="button" onclick="composeOutboundEmail()">写邮件</button>
+        <div class="account-menu">
+          <button id="account-menu-trigger" class="account-trigger" type="button" aria-haspopup="menu" aria-expanded="false" onclick="toggleAccountMenu()">
+            <span id="account-brand-mark" class="account-avatar" aria-hidden="true">服</span>
+            <span id="auth-user" class="auth-user">账户</span>
+            <span class="account-chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div id="account-menu-panel" class="account-menu-panel hidden" role="menu">
+            <div class="account-menu-label">账户与系统</div>
+            <button type="button" role="menuitem" onclick="closeAccountMenu();loadCurrent()"><span>↻</span><span><strong>刷新数据</strong><small>重新载入当前页面</small></span></button>
+            <button type="button" role="menuitem" onclick="closeAccountMenu();changePassword()"><span>◇</span><span><strong>密码与账号</strong><small>由管理员在账号管理中重置</small></span></button>
+            <button class="account-logout" type="button" role="menuitem" onclick="closeAccountMenu();logout()"><span>↪</span><span><strong>退出登录</strong><small>安全退出当前账户</small></span></button>
+          </div>
+        </div>
+      </div>
+    </header>
+    <section id="content" tabindex="-1" aria-labelledby="page-title"><div class="loading"><span aria-hidden="true"></span><strong>正在载入</strong><small>准备当前工作区…</small></div></section>
+  </main>
+  <div id="connection-banner" class="connection-banner hidden" role="status">与管理员主机的连接已中断，正在自动重连…</div>
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-card" tabindex="-1"><div class="modal-head"><h2 id="modal-title"></h2><button class="icon" type="button" aria-label="关闭对话框" onclick="closeModal()">×</button></div><form id="modal-form"><div id="modal-body"></div><div class="modal-actions"><button type="button" class="ghost" onclick="closeModal()">取消</button><button class="primary" type="submit">保存</button></div></form></div></div>
+  <div id="global-search" class="search-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="global-search-title"><div class="search-palette"><div class="search-head"><span aria-hidden="true">⌕</span><input id="global-search-input" type="search" autocomplete="off" placeholder="检索工单号、报价号、客户、序列号或邮件" aria-label="全局检索"><button class="icon" type="button" aria-label="关闭检索" onclick="closeGlobalSearch()">×</button></div><div id="global-search-results" class="search-results"><div class="empty">输入关键词开始检索</div></div><div class="search-foot"><span id="global-search-title">全局检索</span><span>Enter 打开 · Esc 关闭 · 双击结果也可打开</span></div></div></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=20260824-p0-security"></script>
+  <script src="/static/workflow.js?v=20260824-p0-security"></script>
+</body>
+</html>
