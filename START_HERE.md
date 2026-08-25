@@ -53,4 +53,4 @@ http://192.168.1.20:8000/
 - 提示找不到依赖：如果已创建虚拟环境，执行 `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`；否则使用报错信息中显示的 Python 绝对路径执行安装命令。
 - 端口被占用：关闭旧的启动窗口，或使用 `scripts\run_host.py --standalone --port 8001`。
 - 局域网无法连接：确认成员电脑与主机在同一网络，并允许 Windows 防火墙放行所用端口；不要把端口映射到公网。
-- 启动前无需运行旧程序 `legacy_quote_app.py`；它和 `quotation.db` 仅作为历史程序及历史数据保留。
+- 启动前无需运行旧程序 `legacy_quote_app.py`。本交付不包含旧数据库或历史业务数据；若需迁移，应由管理员另行选择并备份自有旧库。

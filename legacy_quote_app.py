@@ -708,7 +708,7 @@ def generate_pdf(path: str, data: dict):
                 name="PDF_FallbackPay", parent=cell_style, alignment=1, fontSize=8.5, textColor=colors.HexColor("#64748b")
             )
             fallback_text = Paragraph(
-                mixed("💡 <b>服务通知：该维修工单尚未开启在线快捷通道。生产环境中请扫描上方二维码或致电产品顾问安排付款。</b>服务专线：<b>18994035402</b>  |  微信：<b>同号</b>"),
+                mixed("💡 <b>服务通知：该维修工单尚未开启在线快捷通道。生产环境中请扫描上方二维码，或联系管理员配置的服务顾问安排付款。</b>"),
                 fallback_style
             )
             fallback_table = Table([[fallback_text]], colWidths=[480])
