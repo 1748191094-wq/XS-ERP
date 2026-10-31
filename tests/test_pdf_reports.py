@@ -10,6 +10,61 @@ from reportlab.platypus import Paragraph, Table
 from app.reports.pdf import PdfReportService
 
 
+def test_default_pdf_embeds_chinese_without_host_fonts(tmp_path, monkeypatch):
+    """A font-less PDF reader must receive glyph outlines, not just CID names."""
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import pypdfium2 as pdfium
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.lib.styles import ParagraphStyle
+    from app.reports import pdf as reports
+
+    monkeypatch.setattr(reports, "settings", SimpleNamespace(pdf_font_path=""))
+    name, source = reports._discover_font()
+    assert Path(source) == reports.RESOURCE_DIR / "app/reports/fonts/wqy-microhei.ttc"
+    sample = "中文检测报告维修电压异常Ω℃μ¥"
+    face = pdfmetrics.getFont(name).face
+    assert all(face.charToGlyph.get(ord(char), 0) != 0 for char in sample)
+
+    from reportlab.platypus import SimpleDocTemplate
+    path = tmp_path / "embedded-chinese.pdf"
+    SimpleDocTemplate(str(path)).build([
+        Paragraph(sample, ParagraphStyle("Chinese", fontName=name, fontSize=18, leading=24))
+    ])
+    assert b"/FontFile2" in path.read_bytes()
+    document = pdfium.PdfDocument(path)
+    try:
+        page = document[0]
+        text = page.get_textpage()
+        try:
+            assert sample in text.get_text_range()
+        finally:
+            text.close()
+        bitmap = page.render(scale=1)
+        try:
+            # Chinese-only ink must be present even with no CJK fonts installed.
+            rendered = bitmap.to_pil().convert("L")
+            assert sum(count for shade, count in enumerate(rendered.histogram()) if shade < 128) > 900
+        finally:
+            bitmap.close()
+            page.close()
+    finally:
+        document.close()
+
+
+def test_invalid_custom_pdf_font_falls_back_to_bundled_font(tmp_path, monkeypatch, caplog):
+    from types import SimpleNamespace
+    from app.reports import pdf as reports
+
+    invalid = tmp_path / "invalid.ttf"
+    invalid.write_bytes(b"not a font")
+    monkeypatch.setattr(reports, "settings", SimpleNamespace(pdf_font_path=str(invalid)))
+    _name, source = reports._discover_font()
+    assert source.endswith("app/reports/fonts/wqy-microhei.ttc")
+    assert "Cannot embed PDF font" in caplog.text
+
+
 def _story_text(value) -> str:
     if isinstance(value, Paragraph):
         return value.getPlainText()
@@ -274,3 +329,230 @@ def test_replacement_quote_pdf_freezes_discount_once_and_shows_business_context(
         "置换方案、旧机抵折或其他费用",
     ):
         assert expected in text
+
+
+@pytest.mark.parametrize("size", [(900, 600), (300, 1200), (1200, 100)])
+def test_assessment_evidence_keeps_identity_on_its_page(tmp_path, monkeypatch, size):
+    import pypdfium2 as pdfium
+    import pypdfium2.raw as raw
+    from PIL import Image
+    from reportlab.lib.units import mm
+    from app.reports import pdf as reports
+    from app.storage.local import LocalStorageService
+
+    image_path = tmp_path / "evidence.png"
+    Image.new("RGB", size, "#b54949").save(image_path)
+    monkeypatch.setattr(reports, "LocalStorageService", lambda: LocalStorageService(tmp_path))
+    order = _order()
+    order.order_no = "RO-EVIDENCE-QA"
+    order.fault_description = "开机异常，需检测。"
+    order.intake_condition = "外壳有划痕"
+    order.intake_accessories = "机身、电池"
+    order.customer_notes = "请确认后安排维修。"
+    assessment = NS(
+        assessment_no="DA-QA", conclusion="输入电压异常", responsibility="待确认",
+        repair_recommendation="排查供电模块",
+        results=[NS(
+            step_code="PWR-040", step_snapshot_json={"title": "输入电压 <复测>"},
+            result="fail", measured_value="10.8", unit="V",
+            notes="客户可见复测记录，供电异常。\n" * 50,
+            evidence_attachment_id=1,
+        )],
+    )
+    path = PdfReportService(tmp_path).repair_report(
+        order, assessment=assessment,
+        evidence={1: NS(id=1, storage_path=image_path.name)},
+    )
+    document = pdfium.PdfDocument(path)
+    try:
+        assert len(document) >= 3  # Deliberately force notes across page boundaries.
+        image_count = 0
+        for index in range(len(document)):
+            page = document[index]
+            text = page.get_textpage()
+            try:
+                content = text.get_text_bounded()
+                images = list(page.get_objects(filter=[raw.FPDF_PAGEOBJ_IMAGE]))
+                if images:
+                    assert "异常证据：输入电压 <复测>（PWR-040）" in content
+                    assert len(images) == 1
+                    matrix = images[0].get_matrix()
+                    assert abs(matrix.a) <= 90 * mm + 0.01
+                    assert abs(matrix.d) <= 70 * mm + 0.01
+                    assert abs(matrix.a / matrix.d - size[0] / size[1]) < 0.03
+                    image_count += 1
+                elif "异常证据：" in content:
+                    pytest.fail("Evidence caption was stranded on a page without its image")
+            finally:
+                text.close()
+                page.close()
+        assert image_count == 1
+    finally:
+        document.close()
+
+
+@pytest.mark.parametrize("line_count", [1, 100])
+def test_quote_theme_starts_on_first_page_and_can_span_pages(tmp_path, line_count):
+    import pypdfium2 as pdfium
+
+    order = _order()
+    order.fault_description = "\n".join(
+        f"问题记录 {index:03d}：云台无法回中 <复测> & 待确认。"
+        for index in range(line_count)
+    )
+    order.customer_notes = "请确认维修范围。"
+    quote = NS(
+        quote_no="QT-THEME-QA", version=1, status="draft",
+        created_at=datetime.now(timezone.utc), repair_order=order,
+        items=[], subtotal=Decimal("0"), labor_fee=Decimal("0"),
+        shipping_fee=Decimal("0"), discount=Decimal("0"), total_amount=Decimal("0"),
+    )
+    path = PdfReportService(tmp_path).quote(quote)
+    document = pdfium.PdfDocument(path)
+    try:
+        texts = []
+        for index in range(len(document)):
+            page = document[index]
+            text = page.get_textpage()
+            try:
+                texts.append(text.get_text_bounded())
+            finally:
+                text.close()
+                page.close()
+        assert "服务主题" in texts[0]
+        assert "问题记录 000" in texts[0]
+        combined = "\n".join(texts)
+        for index in range(line_count):
+            assert combined.count(f"问题记录 {index:03d}：") == 1
+        assert combined.count("<复测> & 待确认。") == line_count
+        assert "qa@example.com" in texts[0]
+        assert "定损与维修说明" in combined
+        assert "总计费用" in combined
+        if line_count == 100:
+            assert len(document) >= 3
+    finally:
+        document.close()
+
+
+@pytest.mark.parametrize('item_count', list(range(36)) + [80])
+def test_quote_summary_rows_stay_on_same_page(tmp_path, item_count):
+    import pypdfium2 as pdfium
+
+    order = _order()
+    order.fault_description = '供电检查'
+    order.customer_notes = ''
+    quote = NS(
+        quote_no=f'QT-SUMMARY-{item_count}', version=1, status='draft',
+        created_at=datetime.now(timezone.utc), repair_order=order,
+        items=[NS(item_name=f'检查项目 {i:03d}', item_type='part',
+                  quantity=1, unit_price=Decimal('100'), amount=Decimal('100'))
+               for i in range(item_count)],
+        subtotal=Decimal(item_count * 100), labor_fee=Decimal('50'),
+        shipping_fee=Decimal('20'), discount=Decimal('10'),
+        total_amount=Decimal(item_count * 100 + 60),
+    )
+    path = PdfReportService(tmp_path).quote(quote)
+    texts = []
+    document = pdfium.PdfDocument(path)
+    try:
+        for page in document:
+            text = page.get_textpage()
+            try:
+                texts.append(text.get_text_bounded())
+            finally:
+                text.close()
+                page.close()
+    finally:
+        document.close()
+    summary_pages = [i for i, text in enumerate(texts) if '配件 / 项目小计' in text]
+    total_pages = [i for i, text in enumerate(texts) if '总计费用' in text]
+    assert summary_pages == total_pages and len(summary_pages) == 1
+    summary = texts[summary_pages[0]]
+    assert '人工服务费' in summary and '运费' in summary and '优惠' in summary
+    assert f'{quote.total_amount:,.2f}' in summary
+    for i in range(item_count):
+        assert '\n'.join(texts).count(f'检查项目 {i:03d}') == 1
+
+
+@pytest.mark.parametrize('repair_status,repair_label,quote_status,quote_label', [
+    ('pending_inspection', '待检测', 'draft', '草稿'),
+    ('inspecting', '检测中', 'sent', '已发送'),
+    ('pending_quote', '待报价', 'confirmed', '已确认'),
+    ('quoted', '已报价', 'rejected', '已拒绝'),
+    ('customer_confirmed', '客户已确认', 'superseded', '历史版本'),
+    ('repairing', '维修中', 'draft', '草稿'),
+    ('pending_test', '待测试', 'sent', '已发送'),
+    ('pending_shipping', '待发货', 'confirmed', '已确认'),
+    ('completed', '已完成', 'rejected', '已拒绝'),
+    ('cancelled', '已取消', 'superseded', '历史版本'),
+    ('legacy_<state>&', 'legacy_<state>&', 'legacy_<quote>&', 'legacy_<quote>&'),
+])
+def test_customer_pdf_status_labels(tmp_path, repair_status, repair_label, quote_status, quote_label):
+    import pypdfium2 as pdfium
+    order = _order()
+    order.status = repair_status
+    order.fault_description = '检测供电'
+    order.customer_notes = ''
+    quote = NS(quote_no='QT-STATUS', version=1, status=quote_status,
+               created_at=datetime.now(timezone.utc), repair_order=order,
+               items=[], subtotal=0, labor_fee=0, shipping_fee=0, discount=0, total_amount=0)
+    order.quotes = [quote]
+    service = PdfReportService(tmp_path)
+    for path in (service.quote(quote), service.repair_report(order),
+                 service.repair_report(order, completed=True)):
+        doc = pdfium.PdfDocument(path)
+        page = doc[0]
+        text = page.get_textpage()
+        try:
+            content = text.get_text_bounded()
+            assert quote_label in content
+            if '当前状态' in content:
+                assert repair_label in content
+                if repair_label != repair_status:
+                    assert repair_status not in content
+            if quote_label != quote_status:
+                assert quote_status not in content
+        finally:
+            text.close()
+            page.close()
+            doc.close()
+
+
+def test_pdf_status_mappings_cover_domain_enums():
+    from app.core.enums import QuoteStatus, RepairOrderStatus
+    from app.reports.pdf import QUOTE_STATUS_LABELS, REPAIR_STATUS_LABELS, _status_label
+    assert set(QUOTE_STATUS_LABELS) == set(QuoteStatus)
+    assert set(REPAIR_STATUS_LABELS) == set(RepairOrderStatus)
+    assert _status_label(None, QUOTE_STATUS_LABELS) == '未记录'
+
+
+@pytest.mark.parametrize('note_lines', [0, 5, 10, 15, 20, 25, 30, 35, 40])
+def test_service_report_notice_stays_with_final_status(tmp_path, note_lines):
+    import pypdfium2 as pdfium
+    now = datetime.now(timezone.utc)
+    order = _order()
+    ticket = NS(ticket_no='TKT-NOTICE', ticket_type='technical_support',
+                title='连接检查', description='检查连接状态', status='closed',
+                priority='normal', customer=order.customer, device=order.device,
+                current_owner=None, processing_group=None, created_at=now,
+                due_at=now, first_response_at=now, resolved_at=now, closed_at=now)
+    notes = [NS(created_at=now, content='\n'.join(
+        f'记录 {i:03d}：已复查连接。' for i in range(note_lines)))] if note_lines else []
+    path = PdfReportService(tmp_path).service_ticket(ticket, customer_notes=notes)
+    doc = pdfium.PdfDocument(path)
+    texts = []
+    try:
+        for page in doc:
+            text = page.get_textpage()
+            try:
+                texts.append(text.get_text_bounded())
+            finally:
+                text.close()
+                page.close()
+    finally:
+        doc.close()
+    assert '本报告仅包含客户可见的服务信息' in texts[-1]
+    assert '处理状态' in texts[-1] and '关闭时间' in texts[-1]
+    assert sum(t.count('本报告仅包含客户可见的服务信息') for t in texts) == 1
+    for i in range(note_lines):
+        assert '\n'.join(texts).count(f'记录 {i:03d}：') == 1
