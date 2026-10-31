@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import BusinessError
 from app.models.entities import (
     Customer,
+    DamageAssessment,
     InventoryItem,
     Quote,
     QuoteItem,
@@ -16,7 +17,8 @@ from app.models.entities import (
     ServiceTicketTimeline,
     utcnow,
 )
-from app.schemas.domain import QuoteCreate
+from app.schemas.domain import QuoteCreate, QuoteItemInput
+from app.services.damage_assessment import latest_completed_assessment
 from app.services.numbering import make_no
 from app.services.orders import RepairOrderService
 
@@ -96,7 +98,35 @@ class QuoteService:
             if not customer or customer.deleted_at is not None:
                 raise BusinessError("客户不存在", code="customer_not_found", status_code=404)
 
-        for item_input in payload.items:
+        if "damage_assessment_id" in payload.model_fields_set:
+            assessment = db.get(DamageAssessment, payload.damage_assessment_id) if payload.damage_assessment_id else None
+            if payload.damage_assessment_id and (
+                not order or not assessment or assessment.repair_order_id != order.id
+                or assessment.deleted_at is not None or assessment.status != "completed"
+            ):
+                raise BusinessError(
+                    "引用的定损单不可用，请重新选择维修工单并核对检测结论后保存",
+                    code="quote_assessment_source_invalid", status_code=409,
+                )
+        else:
+            assessment = latest_completed_assessment(db, order.id) if order else None
+        # Omitted fields inherit; explicit null/empty values remain intentional overrides.
+        assessment_values = {name: getattr(payload, name) for name in (
+            "assessment_result", "assessment_responsibility", "repair_recommendation"
+        )}
+        if assessment:
+            for name, source in (("assessment_result", "conclusion"), ("assessment_responsibility", "responsibility"), ("repair_recommendation", "repair_recommendation")):
+                if name not in payload.model_fields_set:
+                    assessment_values[name] = getattr(assessment, source)
+        items = list(payload.items)
+        # An explicitly supplied list (including []) is already reviewed by the user.
+        # Never silently reinsert a deleted estimate or append it to real parts.
+        if assessment and "items" not in payload.model_fields_set and assessment.estimated_cost is not None:
+            previous = db.scalar(select(Quote.id).where(Quote.damage_assessment_id == assessment.id).limit(1))
+            if previous is None:
+                items.append(QuoteItemInput(item_name="维修预估（待核价）", item_type="service", unit_price=assessment.estimated_cost, remarks=f"来自定损单 {assessment.assessment_no}"))
+
+        for item_input in items:
             if Decimal(item_input.quantity) <= 0:
                 raise BusinessError("报价项数量必须大于 0", code="invalid_quote_quantity", status_code=409)
             if Decimal(item_input.unit_price) < 0:
@@ -125,16 +155,17 @@ class QuoteService:
             service_ticket_id=ticket.id if ticket else None,
             version=current_version + 1,
             status="draft", discount=money(payload.discount), labor_fee=money(payload.labor_fee), shipping_fee=money(payload.shipping_fee),
-            assessment_result=payload.assessment_result if order else None,
-            assessment_responsibility=payload.assessment_responsibility if order else None,
-            repair_recommendation=payload.repair_recommendation if order else None,
+            damage_assessment_id=assessment.id if assessment else None,
+            assessment_result=assessment_values["assessment_result"] if order else None,
+            assessment_responsibility=assessment_values["assessment_responsibility"] if order else None,
+            repair_recommendation=assessment_values["repair_recommendation"] if order else None,
             customer_notice=payload.customer_notice if order else None,
             payment_url=payload.payment_url,
         )
         db.add(quote)
         db.flush()
         subtotal = Decimal("0")
-        for item_input in payload.items:
+        for item_input in items:
             amount = money(item_input.quantity * item_input.unit_price)
             subtotal += amount
             db.add(QuoteItem(quote_id=quote.id, amount=amount, **item_input.model_dump()))

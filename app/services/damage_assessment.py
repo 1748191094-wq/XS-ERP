@@ -13,6 +13,7 @@ from app.models.entities import (
     DamageAssessmentResult,
     DamageSopStep,
     DamageSopTemplate,
+    Diagnosis,
     DroneDevice,
     PointMap,
     PointMarker,
@@ -23,6 +24,8 @@ from app.schemas.domain import (
     DamageAssessmentResultUpdate,
 )
 from app.services.numbering import make_no
+from app.services.orders import RepairOrderService
+from app.services.timeline import _order_timeline
 
 
 def template_applies(template: DamageSopTemplate, device: DroneDevice) -> bool:
@@ -126,8 +129,43 @@ def update_result(
             raise BusinessError("证据附件不属于当前维修工单", code="assessment_evidence_mismatch", status_code=409)
     for name, value in payload.model_dump().items():
         setattr(result, name, value)
+    result.source = "manual"
+    result.source_ref_json = None
     result.completed_by = user_id
     result.completed_at = datetime.now(timezone.utc)
+    db.flush()
+    return result
+
+
+# Matches the shipped generic SOP; custom templates require an explicit selection.
+DIAGNOSIS_STEP_MAP = {
+    "battery": "PWR-040", "motor": "FUNC-070", "esc": "FUNC-070",
+    "imu": "FUNC-070", "compass": "FUNC-070", "gps": "LINK-060",
+    "flight_event": "FAULT-080",
+}
+
+
+def adopt_diagnosis(db: Session, *, assessment: DamageAssessment, diagnosis_id: int,
+                   result_id: int, payload: DamageAssessmentResultUpdate, user_id: int) -> DamageAssessmentResult:
+    diagnosis = db.get(Diagnosis, diagnosis_id)
+    if not diagnosis or diagnosis.repair_order_id != assessment.repair_order_id:
+        raise BusinessError("系统建议不属于当前工单", code="diagnosis_order_mismatch", status_code=409)
+    if diagnosis.damage_assessment_id is not None:
+        raise BusinessError("该建议已被采纳，请在对应步骤中复核", code="diagnosis_already_adopted", status_code=409)
+    result = db.get(DamageAssessmentResult, result_id)
+    if not result or result.assessment_id != assessment.id:
+        raise BusinessError("定损步骤不存在", code="damage_assessment_result_not_found", status_code=404)
+    if result.result != "pending":
+        raise BusinessError("该步骤已有结果，请直接复核，避免覆盖", code="assessment_result_exists", status_code=409)
+    result = update_result(db, assessment=assessment, result_id=result_id, payload=payload, user_id=user_id)
+    result.source = "log_rule"
+    result.source_ref_json = {"diagnosis_id": diagnosis.id}
+    diagnosis.damage_assessment_id = assessment.id
+    diagnosis.sop_step_code = result.step_code
+    diagnosis.confirmed_result = payload.result
+    diagnosis.confirmed_by = user_id
+    _order_timeline(db, assessment.repair_order_id, "diagnosis_adopted", f"人工确认系统建议：{diagnosis.title}", user_id,
+                    {"diagnosis_id": diagnosis.id, "damage_assessment_id": assessment.id, "step_code": result.step_code})
     db.flush()
     return result
 
@@ -137,6 +175,7 @@ def complete_assessment(
     *,
     assessment: DamageAssessment,
     payload: DamageAssessmentComplete,
+    user_id: int | None = None,
 ) -> DamageAssessment:
     if assessment.status != "in_progress":
         raise BusinessError("定损任务已经结束", code="damage_assessment_closed", status_code=409)
@@ -157,6 +196,12 @@ def complete_assessment(
     assessment.repair_recommendation = payload.repair_recommendation
     assessment.estimated_cost = payload.estimated_cost
     assessment.completed_at = datetime.now(timezone.utc)
+    order = db.get(RepairOrder, assessment.repair_order_id)
+    if not order or order.deleted_at is not None:
+        raise BusinessError("维修工单不存在", code="order_not_found", status_code=404)
+    if order.status in {"pending_inspection", "inspecting"}:
+        RepairOrderService.change_status(db, order, "pending_quote", changed_by=user_id, reason=f"完成定损 {assessment.assessment_no}")
+    _order_timeline(db, order.id, "assessment_completed", f"完成定损 {assessment.assessment_no}", user_id, {"damage_assessment_id": assessment.id})
     db.flush()
     return assessment
 
@@ -194,6 +239,10 @@ def assessment_detail(db: Session, assessment: DamageAssessment) -> dict:
         "order": order,
         "device": device,
         "results": assessment.results,
+        "suggestions": [
+            {"diagnosis": item, "suggested_step_code": DIAGNOSIS_STEP_MAP.get(item.diagnosis_type)}
+            for item in db.scalars(select(Diagnosis).where(Diagnosis.repair_order_id == assessment.repair_order_id).order_by(Diagnosis.id.desc()))
+        ],
         "point_maps": point_maps,
         "progress": {
             "completed": completed,
@@ -202,3 +251,11 @@ def assessment_detail(db: Session, assessment: DamageAssessment) -> dict:
             "percent": round(completed * 100 / len(assessment.results)) if assessment.results else 0,
         },
     }
+
+
+def latest_completed_assessment(db: Session, order_id: int) -> DamageAssessment | None:
+    return db.scalar(select(DamageAssessment).where(
+        DamageAssessment.repair_order_id == order_id,
+        DamageAssessment.status == "completed",
+        DamageAssessment.deleted_at.is_(None),
+    ).order_by(DamageAssessment.completed_at.desc(), DamageAssessment.id.desc()).limit(1))

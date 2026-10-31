@@ -552,6 +552,8 @@ class QuoteItemInput(BaseModel):
 class QuoteCreate(BaseModel):
     repair_order_id: int | None = None
     service_ticket_id: int | None = None
+    # Omitted: legacy latest-completed behavior. Null: deliberately no source.
+    damage_assessment_id: int | None = Field(default=None, gt=0)
     discount: Decimal = Field(default=Decimal("0.00"), ge=0)
     labor_fee: Decimal = Field(default=Decimal("0.00"), ge=0)
     shipping_fee: Decimal = Field(default=Decimal("0.00"), ge=0)
@@ -588,6 +590,7 @@ class QuoteItemRead(ORMModel):
 
 
 class QuoteRead(ORMModel):
+    damage_assessment_id: int | None = None
     id: int
     quote_no: str
     repair_order_id: int | None
