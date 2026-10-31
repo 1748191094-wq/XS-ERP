@@ -22,19 +22,23 @@ const nav = [
 </script>
 
 <template>
-  <div class="app-shell">
+  <div :class="['app-shell', {'service-shell':route.name==='work-orders'}]">
     <header class="desktop-header">
       <RouterLink to="/" class="brand"><span class="brand-mark">{{ brandMark }}</span><span>{{ brandName }}</span></RouterLink>
-      <nav><RouterLink v-for="item in nav" :key="item.to" :to="item.to">{{ item.label }}</RouterLink></nav>
+      <nav><RouterLink v-for="item in nav" :key="item.to" :to="item.to" active-class="" exact-active-class="router-link-active">{{ item.label }}</RouterLink></nav>
     </header>
     <main :class="['page-container', { 'page-full': fullBleed, 'page-community': communityPage, 'page-community-feed': communityFeedPage }]">
       <RouterView />
     </main>
     <nav class="bottom-nav" aria-label="主要导航">
-      <RouterLink v-for="item in nav" :key="item.to" :to="item.to">
+      <RouterLink v-for="item in nav" :key="item.to" :to="item.to" active-class="" exact-active-class="router-link-active">
         <component :is="item.icon" :size="21" :stroke-width="1.9" />
         <span>{{ item.label }}</span>
       </RouterLink>
     </nav>
   </div>
 </template>
+
+<style scoped>
+.service-shell{background:var(--card);min-height:100vh}
+</style>

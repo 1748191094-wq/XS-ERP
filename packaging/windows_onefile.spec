@@ -90,6 +90,7 @@ alembic_datas = [
 
 datas = [
     (str(project_root / "app" / "static"), "app/static"),
+    (str(project_root / "app" / "reports" / "fonts"), "app/reports/fonts"),
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "member_client.html"), "."),
 ]
