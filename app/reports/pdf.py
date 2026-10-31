@@ -4,6 +4,9 @@ import html
 import json
 import os
 import tempfile
+import logging
+from io import BytesIO
+from PIL import Image as PILImage
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +23,7 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    Image,
     CondPageBreak,
     KeepTogether,
     LongTable,
@@ -30,7 +34,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from app.core.config import BASE_DIR, settings
+from app.core.config import BASE_DIR, RESOURCE_DIR, settings
+from app.storage.local import LocalStorageService
 from app.models.entities import Quote, RepairOrder, ServiceTicket, ServiceTicketNote
 
 
@@ -45,9 +50,28 @@ SUMMARY_BG = colors.HexColor("#EEF6FF")
 WHITE = colors.white
 
 
+QUOTE_STATUS_LABELS = {
+    "draft": "草稿", "sent": "已发送", "confirmed": "已确认",
+    "rejected": "已拒绝", "superseded": "历史版本",
+}
+REPAIR_STATUS_LABELS = {
+    "pending_inspection": "待检测", "inspecting": "检测中",
+    "pending_quote": "待报价", "quoted": "已报价",
+    "customer_confirmed": "客户已确认", "repairing": "维修中",
+    "pending_test": "待测试", "pending_shipping": "待发货",
+    "completed": "已完成", "cancelled": "已取消",
+}
+
+
+def _status_label(value, labels: dict[str, str]) -> str:
+    # Preserve unfamiliar persisted values instead of claiming a known state.
+    return labels.get(value, str(value) if value else "未记录")
+
+
 def _discover_font() -> tuple[str, str]:
     candidates = [
         settings.pdf_font_path,
+        str(RESOURCE_DIR / "app" / "reports" / "fonts" / "wqy-microhei.ttc"),
         os.path.join(os.getenv("WINDIR", ""), "Fonts", "Deng.ttf") if os.getenv("WINDIR") else "",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
@@ -68,7 +92,9 @@ def _discover_font() -> tuple[str, str]:
             )
             return "RepairCN", str(path)
         except Exception:
+            logging.getLogger(__name__).warning("Cannot embed PDF font: %s", path)
             continue
+    logging.getLogger(__name__).warning("No embeddable PDF font found; Chinese display depends on the PDF reader")
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     return "STSong-Light", "ReportLab CID fallback"
 
@@ -414,8 +440,7 @@ class PdfReportService:
             "旧机 / 置换方案" if is_replacement else "零售商品 / 服务"
         )
         serial_number = device.serial_number if device else "-"
-        # A service ticket's public subject is its title.  The description belongs
-        # in the detailed problem section, not in the service-theme metadata row.
+        # A service ticket's public subject is its title, not its description.
         service_theme = (ticket.title if ticket else getattr(order, "title", None)) or (
             order.fault_description if order else "-"
         )
@@ -430,11 +455,13 @@ class PdfReportService:
             self._info_card([
                 ("客户", customer.name, "联系电话", customer.phone or "-"),
                 ("工单号", business_no, "设备 / 场景", device_name),
-                ("序列号", serial_number, "报价状态", quote.status),
-                ("服务主题", service_theme, "客户邮箱", customer.email or "-"),
+                ("序列号", serial_number, "报价状态", _status_label(quote.status, QUOTE_STATUS_LABELS)),
+                ("客户邮箱", customer.email or "-", "", ""),
             ], styles),
             Spacer(1, 7 * mm),
         ])
+        # Unlike metadata cells, free-form themes must be able to span pages.
+        story.extend(self._text_section("服务主题", service_theme, styles))
 
         if order:
             story.extend(self._assessment_section(quote, styles))
@@ -504,6 +531,9 @@ class PdfReportService:
             ("TOPPADDING", (0, 0), (-1, -1), 7),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ("BACKGROUND", (0, summary_start), (-1, -2), LIGHT_BG),
+            # Keep the five monetary summary rows together while item rows
+            # remain free to paginate and repeat their column headings.
+            ("NOSPLIT", (0, summary_start), (-1, -1)),
             ("BACKGROUND", (0, -1), (-1, -1), SUMMARY_BG),
             ("LINEABOVE", (0, -1), (-1, -1), 0.8, ACCENT_BLUE),
             ("LINEBELOW", (0, -1), (-1, -1), 1.2, ACCENT_BLUE),
@@ -561,7 +591,7 @@ class PdfReportService:
             document_no=quote.quote_no,
         )
 
-    def repair_report(self, order: RepairOrder, *, completed: bool = False) -> Path:
+    def repair_report(self, order: RepairOrder, *, completed: bool = False, assessment=None, evidence=None) -> Path:
         """Build a customer-safe repair work order in the compact CAS-style layout."""
         styles = _styles()
         title = "维修完成单" if completed else "维修工单"
@@ -579,7 +609,7 @@ class PdfReportService:
             [
                 f"工单号  {order.order_no}",
                 f"生成时间  {_date_text(datetime.now().astimezone())}",
-                f"当前状态  {order.status}",
+                f"当前状态  {_status_label(order.status, REPAIR_STATUS_LABELS)}",
             ],
             styles,
         )
@@ -588,7 +618,7 @@ class PdfReportService:
                 ("客户", customer.name, "工单号", order.order_no),
                 ("设备", _device_name(device.brand, device.model), "序列号", device.serial_number),
                 ("收机时间", _date_text(order.received_at), "报告日期", _date_text(datetime.now().astimezone())),
-                ("联系电话", customer.phone or "-", "报价状态", quote.status if quote else "未报价"),
+                ("联系电话", customer.phone or "-", "报价状态", _status_label(quote.status, QUOTE_STATUS_LABELS) if quote else "未报价"),
             ], styles),
             Spacer(1, 5 * mm),
         ])
@@ -598,18 +628,54 @@ class PdfReportService:
             remark_lines.append(f"收机状态：{order.intake_condition}")
         if order.intake_accessories:
             remark_lines.append(f"随附物品：{order.intake_accessories}")
-        if order.internal_notes:
-            remark_lines.append(f"检测 / 维修结果：{order.internal_notes}")
-        if quote:
+        if assessment or quote:
             for label, value in [
-                ("定损结果", getattr(quote, "assessment_result", None)),
-                ("责任判定", getattr(quote, "assessment_responsibility", None)),
-                ("维修建议", getattr(quote, "repair_recommendation", None)),
+                ("定损结果", assessment.conclusion if assessment else getattr(quote, "assessment_result", None)),
+                ("责任判定", assessment.responsibility if assessment else getattr(quote, "assessment_responsibility", None)),
+                ("维修建议", assessment.repair_recommendation if assessment else getattr(quote, "repair_recommendation", None)),
                 ("客户须知", getattr(quote, "customer_notice", None)),
             ]:
                 if value:
                     remark_lines.append(f"{label}：{value}")
         story.extend(self._text_section("备注", "\n".join(remark_lines), styles, accent=True))
+
+        if assessment:
+            story.append(Paragraph("检测明细", styles["section"]))
+            story.append(Paragraph(_p(f"定损单 {assessment.assessment_no}"), styles["small"]))
+            result_labels = {"pass": "正常", "fail": "异常", "na": "不适用", "pending": "未检查"}
+            for result in assessment.results:
+                snapshot = result.step_snapshot_json or {}
+                # Deliberately whitelist customer fields: no instruction, failure hints or point maps.
+                story.extend(self._text_section(
+                    snapshot.get("title") or result.step_code,
+                    "\n".join(filter(None, [
+                        f"结果：{result_labels.get(result.result, '未检查')}",
+                        f"测量值：{result.measured_value} {result.unit or ''}" if result.measured_value is not None else None,
+                        f"备注：{result.notes}" if result.notes else None,
+                    ])), styles,
+                ))
+                attachment = (evidence or {}).get(result.evidence_attachment_id)
+                if result.result == "fail" and attachment:
+                    try:
+                        with PILImage.open(LocalStorageService().absolute_path(attachment.storage_path)) as picture:
+                            picture.thumbnail((900, 600))
+                            buffer = BytesIO()
+                            picture.convert("RGB").save(buffer, format="JPEG")
+                            width, height = picture.size
+                        buffer.seek(0)
+                        scale = min(1, 90 * mm / width, 70 * mm / height)
+                        caption = f"异常证据：{snapshot.get('title') or result.step_code}（{result.step_code}）"
+                        # Long notes may span pages; repeat the step identity with the
+                        # image so a detached evidence page is still understandable.
+                        story.append(KeepTogether([
+                            Paragraph(_p(caption), styles["small"]),
+                            Spacer(1, 2 * mm),
+                            Image(buffer, width=width * scale, height=height * scale),
+                        ]))
+                        story.append(Spacer(1, 3 * mm))
+                    except (OSError, ValueError, PILImage.DecompressionBombError):
+                        logging.getLogger(__name__).warning("Assessment evidence unavailable: %s", attachment.id)
+                        story.append(Paragraph("证据图暂不可用，请联系维修人员核对原始附件。", styles["small"]))
 
         item_rows: list[list[Paragraph]] = [[
             Paragraph("消耗物料 / 服务项目", styles["header"]),
@@ -782,14 +848,16 @@ class PdfReportService:
             result_lines.append(f"解决时间：{_date_text(ticket.resolved_at)}")
         if ticket.closed_at:
             result_lines.append(f"关闭时间：{_date_text(ticket.closed_at)}")
-        story.extend(self._text_section("处理状态", "\n".join(result_lines), styles))
-        story.extend([
-            CondPageBreak(28 * mm),
+        # This bounded status block and its notice should move as one unit.
+        # Skip the section's fixed preflight break; KeepTogether measures it.
+        closing_section = self._text_section("处理状态", "\n".join(result_lines), styles)[1:]
+        story.append(KeepTogether([
+            *closing_section,
             Paragraph(
                 "本报告仅包含客户可见的服务信息；内部备注、内部协作记录和权限信息不会写入可外发 PDF。",
                 styles["small"],
             ),
-        ])
+        ]))
         return self._atomic_build(
             self.report_dir / f"{ticket.ticket_no}-service.pdf",
             story,

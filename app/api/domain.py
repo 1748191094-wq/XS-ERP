@@ -130,6 +130,8 @@ from app.services.access import (
 )
 from app.services.email import queue_quote_email
 from app.services.inventory import InventoryService
+from app.services.timeline import _order_timeline
+from app.services.damage_assessment import latest_completed_assessment, adopt_diagnosis
 from app.services.numbering import allocate_repair_order_no, make_no
 from app.services.orders import RepairOrderService
 from app.services.quotes import QuoteService
@@ -371,16 +373,6 @@ def _register_order_report(
     return attachment
 
 
-def _order_timeline(db: Session, order_id: int, event_type: str, summary: str, actor_id: int | None, details: dict | None = None) -> None:
-    ticket = db.scalar(select(ServiceTicket).where(ServiceTicket.repair_order_id == order_id))
-    if ticket:
-        db.add(ServiceTicketTimeline(
-            ticket_id=ticket.id,
-            event_type=event_type,
-            summary=summary[:300],
-            actor_id=actor_id,
-            details_json=details,
-        ))
 
 
 @router.get("/dashboard")
@@ -747,6 +739,7 @@ def order_detail(
             ServiceTicket.repair_order_id == order_id,
             ServiceTicket.deleted_at.is_(None),
         )),
+        "damage_assessments": list(db.scalars(select(DamageAssessment).where(DamageAssessment.repair_order_id == order_id, DamageAssessment.deleted_at.is_(None)).order_by(DamageAssessment.created_at.desc(), DamageAssessment.id.desc()))),
         "status_history": list(db.scalars(select(RepairOrderStatusHistory).where(RepairOrderStatusHistory.repair_order_id == order_id).order_by(RepairOrderStatusHistory.changed_at))),
         "quotes": list(db.scalars(select(Quote).where(
             Quote.repair_order_id == order_id,
@@ -796,6 +789,20 @@ def change_order_status(
     RepairOrderService.change_status(db, order, payload.status, changed_by=current_user.id, reason=payload.reason)
     _commit(db)
     return ok(_order_read_for_user(order, current_user))
+
+
+@router.get("/orders/{order_id}/assessment-summary")
+def order_assessment_summary(
+    order_id: int, db: Session = Depends(get_db),
+    current_user: User = Depends(require_authenticated_user),
+) -> dict:
+    _active_order(db, order_id, current_user)
+    assessment = latest_completed_assessment(db, order_id)
+    previous = db.scalar(select(Quote.id).where(Quote.damage_assessment_id == assessment.id).limit(1)) if assessment else None
+    item = None
+    if assessment and assessment.estimated_cost is not None and previous is None:
+        item = {"item_name": "维修预估（待核价）", "item_type": "service", "quantity": 1, "unit_price": assessment.estimated_cost}
+    return ok({"assessment": assessment, "suggested_item": item})
 
 
 @router.patch("/orders/{order_id}/inspection")
@@ -2513,7 +2520,7 @@ def list_damage_assessments(
 @router.post("/damage-assessments", status_code=201)
 def start_damage_assessment(
     payload: DamageAssessmentCreate,
-    current_user: User = Depends(require_authenticated_user),
+    current_user: User = Depends(require_roles("admin", "manager", "engineer", "technical_support")),
     db: Session = Depends(get_db),
 ) -> dict:
     order = db.get(RepairOrder, payload.repair_order_id)
@@ -2554,7 +2561,7 @@ def update_damage_assessment_result(
     assessment_id: int,
     result_id: int,
     payload: DamageAssessmentResultUpdate,
-    current_user: User = Depends(require_authenticated_user),
+    current_user: User = Depends(require_roles("admin", "manager", "engineer", "technical_support")),
     db: Session = Depends(get_db),
 ) -> dict:
     assessment = load_assessment(db, assessment_id)
@@ -2572,17 +2579,31 @@ def update_damage_assessment_result(
     return ok(result)
 
 
+@router.post("/damage-assessments/{assessment_id}/results/{result_id}/adopt/{diagnosis_id}")
+def confirm_assessment_suggestion(
+    assessment_id: int, result_id: int, diagnosis_id: int,
+    payload: DamageAssessmentResultUpdate,
+    current_user: User = Depends(require_roles("admin", "manager", "engineer", "technical_support")),
+    db: Session = Depends(get_db),
+) -> dict:
+    assessment = load_assessment(db, assessment_id)
+    require_order_access(db, db.get(RepairOrder, assessment.repair_order_id), current_user)
+    result = adopt_diagnosis(db, assessment=assessment, diagnosis_id=diagnosis_id, result_id=result_id, payload=payload, user_id=current_user.id)
+    _commit(db)
+    return ok(result)
+
+
 @router.post("/damage-assessments/{assessment_id}/complete")
 def finish_damage_assessment(
     assessment_id: int,
     payload: DamageAssessmentComplete,
-    current_user: User = Depends(require_authenticated_user),
+    current_user: User = Depends(require_roles("admin", "manager", "engineer", "technical_support")),
     db: Session = Depends(get_db),
 ) -> dict:
     assessment = load_assessment(db, assessment_id)
     order = db.get(RepairOrder, assessment.repair_order_id)
     require_order_access(db, order, current_user)
-    assessment = complete_assessment(db, assessment=assessment, payload=payload)
+    assessment = complete_assessment(db, assessment=assessment, payload=payload, user_id=current_user.id)
     _commit(db)
     db.refresh(assessment)
     return ok(assessment_detail(db, load_assessment(db, assessment.id)))
@@ -2952,8 +2973,17 @@ def generate_order_report(
     require_order_access(db, order, current_user)
     if report_type not in {"inspection", "completion"}:
         raise BusinessError("报告类型必须是 inspection 或 completion", code="invalid_report_type")
+    assessment = latest_completed_assessment(db, order.id)
+    evidence = {}
+    if assessment:
+        ids = [row.evidence_attachment_id for row in assessment.results if row.result == "fail" and row.evidence_attachment_id]
+        for attachment in db.scalars(select(Attachment).where(Attachment.id.in_(ids), Attachment.repair_order_id == order.id)):
+            if (attachment.content_type or "").startswith("image/") and not attachment.attachment_type.startswith("point_map"):
+                path = LocalStorageService().absolute_path(attachment.storage_path).resolve()
+                if path.is_relative_to(settings.upload_dir.resolve()):
+                    evidence[attachment.id] = attachment
     path = PdfReportService(brand_name=load_brand_name(db)).repair_report(
-        order, completed=report_type == "completion"
+        order, completed=report_type == "completion", assessment=assessment, evidence=evidence
     )
     _register_order_report(
         db,
